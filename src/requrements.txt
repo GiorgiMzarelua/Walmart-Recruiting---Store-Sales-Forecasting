@@ -1,0 +1,16 @@
+numpy
+pandas
+scikit-learn
+matplotlib
+seaborn
+mlflow
+dagshub
+kaggle
+lightgbm
+xgboost
+catboost
+statsforecast
+mlforecast
+utilsforecast
+prophet
+neuralforecast
