@@ -71,6 +71,26 @@ def add_fourier(df: pd.DataFrame, n_terms: int = 4) -> pd.DataFrame:
         df[f"cos_{k}"] = np.cos(2 * np.pi * k * t)
     return df
 
+# --------------------------------------------------------------------------- #
+# Lag & Rolling features
+# --------------------------------------------------------------------------- #
+def add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Computes historical lags and rolling window statistics per unique series."""
+    df = df.sort_values(["unique_id", "Date"]).copy()
+    
+    if "Weekly_Sales" in df.columns:
+        grouped = df.groupby("unique_id")["Weekly_Sales"]
+        df["lag_1"] = grouped.shift(1)
+        df["lag_2"] = grouped.shift(2)
+        df["lag_4"] = grouped.shift(4)
+        df["lag_52"] = grouped.shift(52)
+        df["rolling_mean_4"] = grouped.transform(lambda x: x.shift(1).rolling(4, min_periods=1).mean())
+        df["rolling_std_4"] = grouped.transform(lambda x: x.shift(1).rolling(4, min_periods=1).std()).fillna(0)
+    else:
+        for col in LAG_COLUMNS:
+            df[col] = np.nan
+            
+    return df
 
 # --------------------------------------------------------------------------- #
 # Seasonal profiles (target-dependent -> fit on TRAIN only)
@@ -129,6 +149,7 @@ def build_features(train: pd.DataFrame, other: pd.DataFrame,
 
     return _pipe(train), _pipe(other)
 
+LAG_COLUMNS = ["lag_1", "lag_2", "lag_4", "lag_52", "rolling_mean_4", "rolling_std_4"]
 
 FEATURE_COLUMNS = [
     "Store", "Dept", "Type", "Size", "IsHoliday",
@@ -155,11 +176,20 @@ LGBM_DEFAULT_PARAMS = dict(
  
  
 def apply_features_with_profiles(df: pd.DataFrame, profiles: dict,
-                                  *, n_fourier: int = 4, drop_markdowns: bool = True) -> pd.DataFrame:
+                                  *, n_fourier: int = 4, drop_markdowns: bool = True, use_lags: bool = False,) -> pd.DataFrame:
+    if use_lags:
+      df = add_lag_features(df)
     df = add_calendar_features(df)
     df = add_holiday_distance(df)
     df = add_fourier(df, n_terms=n_fourier)
     df = apply_seasonal_profiles(df, profiles)
+
+    if use_lags:
+        for col in ["lag_1", "lag_2", "lag_4"]:
+          df[col] = df[col].fillna(df["lag_52"]).fillna(df["seasonal_week_avg"])
+        df["rolling_mean_4"] = df["rolling_mean_4"].fillna(df["seasonal_week_avg"])
+        df["rolling_std_4"] = df["rolling_std_4"].fillna(0)
+                                    
     df["IsHoliday"] = df["IsHoliday"].astype(int)
     for c in CATEGORICAL:
         df[c] = df[c].astype("category")
@@ -174,13 +204,16 @@ def make_sample_weight(df: pd.DataFrame, holiday_weight: float = 5.0) -> np.ndar
  
 def fit_lightgbm(train: pd.DataFrame, *, lgbm_params: dict | None = None,
                  n_fourier: int = 4, drop_markdowns: bool = True,
-                 holiday_weight: float = 5.0) -> dict:
+                 holiday_weight: float = 5.0, use_lags: bool = False,) -> dict:
     from lightgbm import LGBMRegressor
  
     profiles = fit_seasonal_profiles(train)
-    train_fe = apply_features_with_profiles(train, profiles, n_fourier=n_fourier,
-                                             drop_markdowns=drop_markdowns)
- 
+    train_fe = apply_features_with_profiles(
+        train, profiles, n_fourier=n_fourier, drop_markdowns=drop_markdowns, use_lags=use_lags
+    )
+
+    feature_cols = list(FEATURE_COLUMNS) + (LAG_COLUMNS if use_lags else [])
+                   
     params = dict(LGBM_DEFAULT_PARAMS)
     if lgbm_params:
         params.update(lgbm_params)
@@ -189,12 +222,12 @@ def fit_lightgbm(train: pd.DataFrame, *, lgbm_params: dict | None = None,
     w = make_sample_weight(train_fe, holiday_weight=holiday_weight)
  
     booster = LGBMRegressor(**params)
-    booster.fit(train_fe[FEATURE_COLUMNS], y, sample_weight=w)
+    booster.fit(train_fe[feature_cols], y, sample_weight=w)
  
     return {
         "profiles": profiles,
         "booster": booster,
-        "feature_columns": list(FEATURE_COLUMNS),
+        "feature_columns": list(feature_cols),
         "n_fourier": n_fourier,
         "drop_markdowns": drop_markdowns,
     }
@@ -202,8 +235,80 @@ def fit_lightgbm(train: pd.DataFrame, *, lgbm_params: dict | None = None,
  
 def predict_lightgbm(bundle: dict, raw_df: pd.DataFrame) -> np.ndarray:
     df_fe = apply_features_with_profiles(
-        raw_df, bundle["profiles"],
-        n_fourier=bundle["n_fourier"], drop_markdowns=bundle["drop_markdowns"],
+        raw_df,
+        bundle["profiles"],
+        n_fourier=bundle["n_fourier"],
+        drop_markdowns=bundle["drop_markdowns"],
+        use_lags=bundle.get("use_lags", False),
+    )
+    preds_log = bundle["booster"].predict(df_fe[bundle["feature_columns"]])
+    preds = inverse_signed_log1p(preds_log)
+    return np.clip(preds, 0, None)
+
+
+# --------------------------------------------------------------------------- #
+# XGBoost Model Handlers
+# --------------------------------------------------------------------------- #
+XGB_DEFAULT_PARAMS = dict(
+    objective="reg:absoluteerror",
+    eval_metric="mae",
+    n_estimators=2000,
+    learning_rate=0.03,
+    max_depth=8,
+    subsample=0.85,
+    colsample_bytree=0.85,
+    enable_categorical=True,
+    tree_method="hist",
+    random_state=42,
+    n_jobs=-1,
+)
+
+
+def fit_xgboost(
+    train: pd.DataFrame,
+    *,
+    xgb_params: dict | None = None,
+    n_fourier: int = 4,
+    drop_markdowns: bool = True,
+    holiday_weight: float = 5.0,
+    use_lags: bool = False,
+) -> dict:
+    from xgboost import XGBRegressor
+
+    profiles = fit_seasonal_profiles(train)
+    train_fe = apply_features_with_profiles(
+        train, profiles, n_fourier=n_fourier, drop_markdowns=drop_markdowns, use_lags=use_lags
+    )
+
+    feature_cols = list(FEATURE_COLUMNS) + (LAG_COLUMNS if use_lags else [])
+
+    params = dict(XGB_DEFAULT_PARAMS)
+    if xgb_params:
+        params.update(xgb_params)
+
+    y = signed_log1p(train_fe["Weekly_Sales"])
+    w = make_sample_weight(train_fe, holiday_weight=holiday_weight)
+
+    booster = XGBRegressor(**params)
+    booster.fit(train_fe[feature_cols], y, sample_weight=w)
+
+    return {
+        "profiles": profiles,
+        "booster": booster,
+        "feature_columns": feature_cols,
+        "n_fourier": n_fourier,
+        "drop_markdowns": drop_markdowns,
+        "use_lags": use_lags,
+    }
+
+
+def predict_xgboost(bundle: dict, raw_df: pd.DataFrame) -> np.ndarray:
+    df_fe = apply_features_with_profiles(
+        raw_df,
+        bundle["profiles"],
+        n_fourier=bundle["n_fourier"],
+        drop_markdowns=bundle["drop_markdowns"],
+        use_lags=bundle.get("use_lags", False),
     )
     preds_log = bundle["booster"].predict(df_fe[bundle["feature_columns"]])
     preds = inverse_signed_log1p(preds_log)
