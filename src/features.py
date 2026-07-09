@@ -138,3 +138,73 @@ FEATURE_COLUMNS = [
     "sin_1", "cos_1", "sin_2", "cos_2", "sin_3", "cos_3", "sin_4", "cos_4",
     "seasonal_week_avg",
 ]
+
+LGBM_DEFAULT_PARAMS = dict(
+    objective="regression_l1",
+    metric="l1",
+    n_estimators=2000,
+    learning_rate=0.03,
+    num_leaves=63,
+    feature_fraction=0.85,
+    bagging_fraction=0.85,
+    bagging_freq=1,
+    min_child_samples=20,
+    random_state=42,
+    n_jobs=-1,
+)
+ 
+ 
+def apply_features_with_profiles(df: pd.DataFrame, profiles: dict,
+                                  *, n_fourier: int = 4, drop_markdowns: bool = True) -> pd.DataFrame:
+    df = add_calendar_features(df)
+    df = add_holiday_distance(df)
+    df = add_fourier(df, n_terms=n_fourier)
+    df = apply_seasonal_profiles(df, profiles)
+    df["IsHoliday"] = df["IsHoliday"].astype(int)
+    for c in CATEGORICAL:
+        df[c] = df[c].astype("category")
+    if drop_markdowns:
+        df = df.drop(columns=[c for c in MARKDOWNS if c in df.columns])
+    return df
+ 
+ 
+def make_sample_weight(df: pd.DataFrame, holiday_weight: float = 5.0) -> np.ndarray:
+    return np.where(df["IsHoliday"].astype(bool), holiday_weight, 1.0)
+ 
+ 
+def fit_lightgbm(train: pd.DataFrame, *, lgbm_params: dict | None = None,
+                 n_fourier: int = 4, drop_markdowns: bool = True,
+                 holiday_weight: float = 5.0) -> dict:
+    from lightgbm import LGBMRegressor
+ 
+    profiles = fit_seasonal_profiles(train)
+    train_fe = apply_features_with_profiles(train, profiles, n_fourier=n_fourier,
+                                             drop_markdowns=drop_markdowns)
+ 
+    params = dict(LGBM_DEFAULT_PARAMS)
+    if lgbm_params:
+        params.update(lgbm_params)
+ 
+    y = signed_log1p(train_fe["Weekly_Sales"])
+    w = make_sample_weight(train_fe, holiday_weight=holiday_weight)
+ 
+    booster = LGBMRegressor(**params)
+    booster.fit(train_fe[FEATURE_COLUMNS], y, sample_weight=w)
+ 
+    return {
+        "profiles": profiles,
+        "booster": booster,
+        "feature_columns": list(FEATURE_COLUMNS),
+        "n_fourier": n_fourier,
+        "drop_markdowns": drop_markdowns,
+    }
+ 
+ 
+def predict_lightgbm(bundle: dict, raw_df: pd.DataFrame) -> np.ndarray:
+    df_fe = apply_features_with_profiles(
+        raw_df, bundle["profiles"],
+        n_fourier=bundle["n_fourier"], drop_markdowns=bundle["drop_markdowns"],
+    )
+    preds_log = bundle["booster"].predict(df_fe[bundle["feature_columns"]])
+    preds = inverse_signed_log1p(preds_log)
+    return np.clip(preds, 0, None)
