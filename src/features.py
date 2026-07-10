@@ -75,22 +75,25 @@ def add_fourier(df: pd.DataFrame, n_terms: int = 4) -> pd.DataFrame:
 # Lag & Rolling features
 # --------------------------------------------------------------------------- #
 def add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Computes historical lags and rolling window statistics per unique series."""
-    df = df.sort_values(["unique_id", "Date"]).copy()
-    
+    """Historical lags + rolling stats per series. Restores the original row
+    order before returning, so predictions stay aligned with the caller's frame."""
+    df = df.copy()
+    df["_orig_order"] = np.arange(len(df))          # positional marker
+    df = df.sort_values(["unique_id", "Date"])      # lags need chronological order per series
+
     if "Weekly_Sales" in df.columns:
-        grouped = df.groupby("unique_id")["Weekly_Sales"]
-        df["lag_1"] = grouped.shift(1)
-        df["lag_2"] = grouped.shift(2)
-        df["lag_4"] = grouped.shift(4)
-        df["lag_52"] = grouped.shift(52)
-        df["rolling_mean_4"] = grouped.transform(lambda x: x.shift(1).rolling(4, min_periods=1).mean())
-        df["rolling_std_4"] = grouped.transform(lambda x: x.shift(1).rolling(4, min_periods=1).std()).fillna(0)
+        g = df.groupby("unique_id")["Weekly_Sales"]
+        df["lag_1"]  = g.shift(1)
+        df["lag_2"]  = g.shift(2)
+        df["lag_4"]  = g.shift(4)
+        df["lag_52"] = g.shift(52)
+        df["rolling_mean_4"] = g.transform(lambda x: x.shift(1).rolling(4, min_periods=1).mean())
+        df["rolling_std_4"]  = g.transform(lambda x: x.shift(1).rolling(4, min_periods=1).std()).fillna(0)
     else:
         for col in LAG_COLUMNS:
             df[col] = np.nan
-            
-    return df
+
+    return df.sort_values("_orig_order").drop(columns="_orig_order")   # <-- restore order
 
 # --------------------------------------------------------------------------- #
 # Seasonal profiles (target-dependent -> fit on TRAIN only)
