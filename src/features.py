@@ -360,8 +360,16 @@ def fit_catboost(train: pd.DataFrame, *, cat_params: dict | None = None,
     y = signed_log1p(train_fe["Weekly_Sales"])
     w = make_sample_weight(train_fe, holiday_weight=holiday_weight)
 
-    cat_features = [c for c in CATEGORICAL if c in feature_cols]
+    cat_features = ["Type"] if "Type" in feature_cols else []
+    
     X = train_fe[feature_cols].copy()
+    
+    # Force Store and Dept to numeric types (int/float)
+    for num_col in ["Store", "Dept"]:
+        if num_col in X.columns:
+            X[num_col] = pd.to_numeric(X[num_col], errors="coerce")
+
+    # Format categorical features as strings for CatBoost Pool
     for c in cat_features:
         X[c] = X[c].astype(str)
 
@@ -383,6 +391,10 @@ def predict_catboost(bundle: dict, raw_df: pd.DataFrame) -> np.ndarray:
         drop_markdowns=bundle["drop_markdowns"], use_lags=bundle.get("use_lags", False),
     )
     X = df_fe[bundle["feature_columns"]].copy()
+    for num_col in ["Store", "Dept"]:
+        if num_col in X.columns:
+            X[num_col] = pd.to_numeric(X[num_col], errors="coerce")
+
     for c in bundle.get("cat_features", []):
         X[c] = X[c].astype(str)
 
