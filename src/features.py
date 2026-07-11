@@ -233,10 +233,13 @@ def fit_lightgbm(train: pd.DataFrame, *, lgbm_params: dict | None = None,
         "feature_columns": list(feature_cols),
         "n_fourier": n_fourier,
         "drop_markdowns": drop_markdowns,
+        "use_lags": use_lags,
     }
  
  
 def predict_lightgbm(bundle: dict, raw_df: pd.DataFrame) -> np.ndarray:
+    original_index = raw_df.index
+
     df_fe = apply_features_with_profiles(
         raw_df,
         bundle["profiles"],
@@ -244,9 +247,12 @@ def predict_lightgbm(bundle: dict, raw_df: pd.DataFrame) -> np.ndarray:
         drop_markdowns=bundle["drop_markdowns"],
         use_lags=bundle.get("use_lags", False),
     )
+
     preds_log = bundle["booster"].predict(df_fe[bundle["feature_columns"]])
     preds = inverse_signed_log1p(preds_log)
-    return np.clip(preds, 0, None)
+    preds = np.clip(preds, 0, None)
+
+    return pd.Series(preds, index=df_fe.index).reindex(original_index).to_numpy()
 
 
 # --------------------------------------------------------------------------- #
