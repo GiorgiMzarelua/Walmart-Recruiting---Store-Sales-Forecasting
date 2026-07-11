@@ -322,3 +322,97 @@ def predict_xgboost(bundle: dict, raw_df: pd.DataFrame) -> np.ndarray:
     preds_log = bundle["booster"].predict(df_fe[bundle["feature_columns"]])
     preds = inverse_signed_log1p(preds_log)
     return np.clip(preds, 0, None)
+
+# --------------------------------------------------------------------------- #
+# CatBoost Model Handlers
+# --------------------------------------------------------------------------- #
+CATBOOST_DEFAULT_PARAMS = dict(
+    loss_function="MAE",
+    eval_metric="MAE",
+    iterations=2000,
+    learning_rate=0.03,
+    depth=8,
+    random_seed=42,
+    verbose=0,
+    thread_count=-1,
+)
+
+
+def fit_catboost(
+    train: pd.DataFrame,
+    *,
+    cat_params: dict | None = None,
+    n_fourier: int = 4,
+    drop_markdowns: bool = True,
+    holiday_weight: float = 5.0,
+    use_lags: bool = False,
+) -> dict:
+    from catboost import CatBoostRegressor, Pool
+
+    profiles = fit_seasonal_profiles(train)
+    train_fe = apply_features_with_profiles(
+        train, profiles, n_fourier=n_fourier, drop_markdowns=drop_markdowns, use_lags=use_lags
+    )
+
+    feature_cols = list(FEATURE_COLUMNS) + (LAG_COLUMNS if use_lags else [])
+
+    params = dict(CATBOOST_DEFAULT_PARAMS)
+    if cat_params:
+        params.update(cat_params)
+
+    y = signed_log1p(train_fe["Weekly_Sales"])
+    w = make_sample_weight(train_fe, holiday_weight=holiday_weight)
+
+    # Convert categorical columns to string/category format for CatBoost
+    cat_features = [c for c in CATEGORICAL if c in feature_cols]
+    train_fe_cb = train_fe[feature_cols].copy()
+    for col in cat_features:
+        train_fe_cb[col] = train_fe_cb[col].astype(str)
+
+    train_pool = Pool(
+        data=train_fe_cb,
+        label=y,
+        weight=w,
+        cat_features=cat_features,
+    )
+
+    booster = CatBoostRegressor(**params)
+    booster.fit(train_pool)
+
+    return {
+        "profiles": profiles,
+        "booster": booster,
+        "feature_columns": feature_cols,
+        "cat_features": cat_features,
+        "n_fourier": n_fourier,
+        "drop_markdowns": drop_markdowns,
+        "use_lags": use_lags,
+    }
+
+
+def predict_catboost(bundle: dict, raw_df: pd.DataFrame) -> np.ndarray:
+    from catboost import Pool
+
+    original_index = raw_df.index
+
+    df_fe = apply_features_with_profiles(
+        raw_df,
+        bundle["profiles"],
+        n_fourier=bundle["n_fourier"],
+        drop_markdowns=bundle["drop_markdowns"],
+        use_lags=bundle.get("use_lags", False),
+    )
+
+    eval_df = df_fe[bundle["feature_columns"]].copy()
+    cat_features = bundle.get("cat_features", [])
+    for col in cat_features:
+        eval_df[col] = eval_df[col].astype(str)
+
+    eval_pool = Pool(data=eval_df, cat_features=cat_features)
+
+    preds_log = bundle["booster"].predict(eval_pool)
+    preds = inverse_signed_log1p(preds_log)
+    preds = np.clip(preds, 0, None)
+
+    preds_series = pd.Series(preds, index=df_fe.index)
+    return preds_series.reindex(original_index).to_numpy()
