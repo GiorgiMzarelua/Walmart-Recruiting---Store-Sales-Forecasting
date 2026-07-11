@@ -335,6 +335,7 @@ CATBOOST_DEFAULT_PARAMS = dict(
     random_seed=42,
     verbose=0,
     thread_count=-1,
+    task_type="GPU",
 )
 
 
