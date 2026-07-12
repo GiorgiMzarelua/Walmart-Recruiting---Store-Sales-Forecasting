@@ -10,7 +10,7 @@ Kaggle-ის კონკურსი: [Walmart Recruiting - Store Sales Foreca
 | **საუკეთესო მოდელი** | `walmart_xgboost` - XGBoost + seasonal profile + Christmas Shift |
 | **Holdout WMAE** | **2,029.35** |
 | **Kaggle Public / Private** | **2,781.53 / 2,887.90** |
-| **გატესტილი მოდელები** | 14 არქიტექტურა, 4 ოჯახი |
+| **გატესტილი მოდელები** | 13 არქიტექტურა, 4 ოჯახი |
 
 ---
 
@@ -291,7 +291,7 @@ Prophet არის **per-series** მოდელი → 3,331 მწკრი
 | store-level აგრეგაცია, multiplicative | 3,683.27 |
 | store-level, multiplicative + holidays | 3,648.30 |
 | per-series (ტოპ-150) + fallback | 2,299.18 |
-| **per-series (ტოპ-300) + fallback** | **2,282.06** ✅ |
+| **per-series (ტოპ-300) + fallback** | **2,282.06** |
 
 **ოთხი დასკვნა:**
 
@@ -607,7 +607,7 @@ TimesFM-ის XReg რეჟიმი მოითხოვს `ForecastConfig(
 
 ---
 
-### 5.14 Foundation — Chronos-2 ⭐
+### 5.13 Foundation — Chronos-2
 
 `model_experiment_chronos.ipynb` · MLflow: `Chronos_Training`
 
